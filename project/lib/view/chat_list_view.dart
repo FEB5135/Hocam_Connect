@@ -1,5 +1,7 @@
+// lib/view/chat_list_view.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:project/widgets/custom_appbar.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/chat_service.dart';
@@ -23,10 +25,13 @@ class _ChatListViewState extends State<ChatListView> {
   final Map<String, DateTime?> _lastTime = {};
   final Map<String, int> _unread = {};
 
+  // members map (conv -> userIds)
+  final Map<String, List<String>> _members = {};
+
   // block status per conversation
   final Map<String, bool> _isDm = {};
-  final Map<String, bool> _iBlocked = {};   // I blocked them?
-  final Map<String, bool> _blockedMe = {};  // they blocked me?
+  final Map<String, bool> _iBlocked = {}; // I blocked them
+  final Map<String, bool> _blockedMe = {}; // they blocked me
 
   // ui
   bool _loading = true;
@@ -36,6 +41,18 @@ class _ChatListViewState extends State<ChatListView> {
   // realtime
   RealtimeChannel? _msgCh;
   RealtimeChannel? _partCh;
+  RealtimeChannel? _blockChMine; // changes where I am blocker
+  RealtimeChannel? _blockChOther; // changes where I am blocked
+
+
+  final TextEditingController _chatReportCtrl = TextEditingController();
+  final List<String> _reportReasons = const [
+    'Harassment / Abuse',
+    'Scam / Fraud',
+    'Spam',
+    'Hate / Threats',
+    'Other',
+  ];
 
   @override
   void initState() {
@@ -47,8 +64,10 @@ class _ChatListViewState extends State<ChatListView> {
   void dispose() {
     _msgCh?.unsubscribe();
     _partCh?.unsubscribe();
+    _blockChMine?.unsubscribe();
+    _blockChOther?.unsubscribe();
     _search.dispose();
-    _blockCh?.unsubscribe();
+    _chatReportCtrl.dispose();
     super.dispose();
   }
 
@@ -58,19 +77,18 @@ class _ChatListViewState extends State<ChatListView> {
     _subscribeRealtime();
   }
 
-  final Map<String, List<String>> _members = {}; // convId -> userIds
-  RealtimeChannel? _blockCh; 
-
-
   // ----------------------- LOADERS -----------------------
 
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
+      // tüm konuşmalar
       List<String> convs = [];
       try {
         final rows = await _svc.getConversationsBasic();
-        convs = rows.map((e) => (e['id'] ?? e['conversation_id']) as String).toList();
+        convs = rows
+            .map((e) => (e['id'] ?? e['conversation_id']) as String)
+            .toList();
       } catch (_) {
         final me = _supa.auth.currentUser!.id;
         final rows = await _supa
@@ -78,7 +96,8 @@ class _ChatListViewState extends State<ChatListView> {
             .select('conversation_id')
             .eq('user_id', me);
         convs = (rows as List)
-            .map((e) => (e as Map<String, dynamic>)['conversation_id'] as String)
+            .map(
+                (e) => (e as Map<String, dynamic>)['conversation_id'] as String)
             .toList();
       }
 
@@ -100,6 +119,90 @@ class _ChatListViewState extends State<ChatListView> {
     }
   }
 
+  // Get other user id
+  Future<String?> _getOtherUserIdFor(String conversationId) async {
+    final me = _supa.auth.currentUser!.id;
+    var mem = _members[conversationId];
+    if (mem == null) {
+      await _ensureMeta(conversationId); // fills _members
+      mem = _members[conversationId];
+    }
+    if (mem == null) return null;
+    final others = mem.where((u) => u != me).toList();
+    return (others.length == 1) ? others.first : null; // only for DMs
+  }
+
+Future<void> _reportAfterBlock(String conversationId) async {
+  final other = await _getOtherUserIdFor(conversationId);
+  if (other == null) return; // group or not resolvable -> silently skip
+
+  String selected = _reportReasons.first;
+  _chatReportCtrl.clear();
+
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: const Text('Report user'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          DropdownButtonFormField<String>(
+            value: selected,
+            items: _reportReasons
+                .map((r) => DropdownMenuItem(value: r, child: Text(r)))
+                .toList(),
+            onChanged: (v) => selected = v ?? selected,
+            decoration: const InputDecoration(labelText: 'Reason'),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _chatReportCtrl,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: 'Details (optional)',
+              hintText: 'Add any context (optional)…',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Submit')),
+      ],
+    ),
+  );
+
+  if (ok != true) return;
+
+  final me = _supa.auth.currentUser?.id;
+  if (me == null) return;
+
+  try {
+    await _supa.from('chat_abuse_reports').insert({
+      'conversation_id': conversationId,
+      'reporter_id': me,
+      'reported_user_id': other,
+      'reason': selected,
+      'details': _chatReportCtrl.text.trim().isEmpty ? null : _chatReportCtrl.text.trim(),
+      'message_id': null,
+    });
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Report submitted.')));
+  } on PostgrestException catch (e) {
+    if (e.code == '23505') {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You already reported this conversation.')));
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not submit: ${e.message}')));
+    }
+  } catch (e) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not submit: $e')));
+  }
+}
+
+
+
   Future<void> _loadUnread() async {
     try {
       final rows = await _supa.rpc('get_unread_counts');
@@ -115,7 +218,28 @@ class _ChatListViewState extends State<ChatListView> {
     } catch (_) {}
   }
 
+  // snippet üretirken decrypt fail olursa: 1 kere E2EE repair deneyelim
+  Future<String> _safeDecryptSnippet(ChatMessage last) async {
+    try {
+      await _svc.ensureMyLongTermKey(); // cihaz anahtarı garanti
+      await _svc.bootstrapCekIfMissing(last.conversationId);
+      return await _svc.decryptMessageForUi(last);
+    } catch (_) {
+      // tek seferlik repair (varsa rpc)
+      try {
+        await _supa
+            .rpc('reset_conv_cek', params: {'_cid': last.conversationId});
+        await _svc.bootstrapCekIfMissing(last.conversationId);
+        return await _svc.decryptMessageForUi(last);
+      } catch (_) {
+        // yine de olmadıysa güvenli yer tutucu
+        return '(encrypted)';
+      }
+    }
+  }
+
   Future<void> _ensureMeta(String conversationId) async {
+    // title & avatar & members
     if (!_title.containsKey(conversationId)) {
       final me = _supa.auth.currentUser!.id;
       final parts = await _supa
@@ -133,7 +257,8 @@ class _ChatListViewState extends State<ChatListView> {
       if (others.length == 1) {
         final map = await _svc.getDisplayMap([others.first]);
         final d = map[others.first];
-        _title[conversationId] = d?.displayName ?? 'User ${others.first.substring(0, 6)}';
+        _title[conversationId] =
+            d?.displayName ?? 'User ${others.first.substring(0, 6)}';
         _avatar[conversationId] = d?.avatarUrl;
       } else if (others.length > 1) {
         _title[conversationId] = 'Group (${others.length + 1})';
@@ -144,24 +269,20 @@ class _ChatListViewState extends State<ChatListView> {
       }
     }
 
+    // last message -> snippet
     if (!_snippet.containsKey(conversationId)) {
       final last = await _svc.fetchLastMessage(conversationId);
       if (last == null) {
         _snippet[conversationId] = '';
         _lastTime[conversationId] = null;
       } else {
-        try {
-          final text = await _svc.decryptMessageForUi(last);
-          _snippet[conversationId] = text;
-          _lastTime[conversationId] = last.createdAt.toLocal();
-        } catch (_) {
-          _snippet[conversationId] = '(unable to decrypt)';
-          _lastTime[conversationId] = last.createdAt.toLocal();
-        }
+        final txt = await _safeDecryptSnippet(last);
+        _snippet[conversationId] = txt;
+        _lastTime[conversationId] = last.createdAt.toLocal();
       }
     }
 
-    // ---- fetch block status (once)
+    // block status (once)
     if (!_isDm.containsKey(conversationId)) {
       try {
         final st = await _svc.getBlockStatus(conversationId);
@@ -187,6 +308,9 @@ class _ChatListViewState extends State<ChatListView> {
   // ----------------------- REALTIME -----------------------
 
   void _subscribeRealtime() {
+    final me = _supa.auth.currentUser!.id;
+
+    // Mesaj insertleri -> snippet + unread
     _msgCh = _supa.channel('chatlist:messages')
       ..onPostgresChanges(
         event: PostgresChangeEvent.insert,
@@ -199,12 +323,11 @@ class _ChatListViewState extends State<ChatListView> {
           }
           _lastTime[m.conversationId] = m.createdAt.toLocal();
           try {
-            final text = await _svc.decryptMessageForUi(m);
+            final text = await _safeDecryptSnippet(m);
             _snippet[m.conversationId] = text;
           } catch (_) {
-            _snippet[m.conversationId] = '(unable to decrypt)';
+            _snippet[m.conversationId] = '(encrypted)';
           }
-          final me = _supa.auth.currentUser!.id;
           if (m.senderId != me) {
             _unread[m.conversationId] = (_unread[m.conversationId] ?? 0) + 1;
           }
@@ -214,6 +337,7 @@ class _ChatListViewState extends State<ChatListView> {
       )
       ..subscribe();
 
+    // participants: katıl/çıkar & unread reset
     _partCh = _supa.channel('chatlist:participants')
       ..onPostgresChanges(
         event: PostgresChangeEvent.insert,
@@ -221,7 +345,7 @@ class _ChatListViewState extends State<ChatListView> {
         table: 'participants',
         callback: (payload) async {
           final r = payload.newRecord;
-          if (r['user_id'] == _supa.auth.currentUser!.id) {
+          if (r['user_id'] == me) {
             final cid = r['conversation_id'] as String;
             await _onNewConversationDetected(cid);
           }
@@ -233,8 +357,9 @@ class _ChatListViewState extends State<ChatListView> {
         table: 'participants',
         callback: (payload) async {
           final r = payload.newRecord;
-          if (r['user_id'] == _supa.auth.currentUser!.id) {
+          if (r['user_id'] == me) {
             final cid = r['conversation_id'] as String;
+            // server unread sıfırlanınca hemen UI’da sıfırla
             _unread[cid] = 0;
             if (mounted) setState(() {});
           }
@@ -246,7 +371,7 @@ class _ChatListViewState extends State<ChatListView> {
         table: 'participants',
         callback: (payload) async {
           final r = payload.oldRecord;
-          if (r['user_id'] == _supa.auth.currentUser!.id) {
+          if (r['user_id'] == me) {
             final cid = r['conversation_id'] as String;
             _removeLocal(cid);
           }
@@ -254,50 +379,91 @@ class _ChatListViewState extends State<ChatListView> {
       )
       ..subscribe();
 
-      final me = _supa.auth.currentUser!.id;
+    // BLOCK realtime — ben bloklarsam (blocker_id == me)
+    _blockChMine = _supa.channel('chatlist:user_blocks:mine')
+      ..onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'user_blocks',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'blocker_id',
+          value: me,
+        ),
+        callback: (payload) async {
+          final other = payload.newRecord['blocked_id'] as String?;
+          if (other == null) return;
+          final cid = _findDmWith(other);
+          if (cid != null) {
+            _isDm[cid] = true;
+            _iBlocked[cid] = true;
+            if (mounted) setState(() {});
+          }
+        },
+      )
+      ..onPostgresChanges(
+        event: PostgresChangeEvent.delete,
+        schema: 'public',
+        table: 'user_blocks',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'blocker_id',
+          value: me,
+        ),
+        callback: (payload) async {
+          final other = payload.oldRecord['blocked_id'] as String?;
+          if (other == null) return;
+          final cid = _findDmWith(other);
+          if (cid != null) {
+            _iBlocked[cid] = false;
+            if (mounted) setState(() {});
+          }
+        },
+      )
+      ..subscribe();
 
-      _blockCh = _supa.channel('chatlist:user_blocks')
-        ..onPostgresChanges(
-          event: PostgresChangeEvent.insert,
-          schema: 'public',
-          table: 'user_blocks',
-          filter: PostgresChangeFilter(
-            type: PostgresChangeFilterType.eq,
-            column: 'blocker_id',
-            value: me,
-          ),
-          callback: (payload) async {
-            final other = payload.newRecord['blocked_id'] as String?;
-            if (other == null) return;
-            // find DM containing me + other
-            final cid = _findDmWith(other);
-            if (cid != null) {
-              _iBlocked[cid] = true;
-              _isDm[cid] = true;
-              if (mounted) setState(() {});
-            }
-          },
-        )
-        ..onPostgresChanges(
-          event: PostgresChangeEvent.delete,
-          schema: 'public',
-          table: 'user_blocks',
-          filter: PostgresChangeFilter(
-            type: PostgresChangeFilterType.eq,
-            column: 'blocker_id',
-            value: me,
-          ),
-          callback: (payload) async {
-            final other = payload.oldRecord['blocked_id'] as String?;
-            if (other == null) return;
-            final cid = _findDmWith(other);
-            if (cid != null) {
-              _iBlocked[cid] = false;
-              if (mounted) setState(() {});
-            }
-          },
-        )
-        ..subscribe();
+    // BLOCK realtime — karşı taraf beni bloklarsa (blocked_id == me)
+    _blockChOther = _supa.channel('chatlist:user_blocks:other')
+      ..onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'user_blocks',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'blocked_id',
+          value: me,
+        ),
+        callback: (payload) async {
+          final blocker = payload.newRecord['blocker_id'] as String?;
+          if (blocker == null) return;
+          final cid = _findDmWith(blocker);
+          if (cid != null) {
+            _isDm[cid] = true;
+            _blockedMe[cid] = true;
+            if (mounted) setState(() {});
+          }
+        },
+      )
+      ..onPostgresChanges(
+        event: PostgresChangeEvent.delete,
+        schema: 'public',
+        table: 'user_blocks',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'blocked_id',
+          value: me,
+        ),
+        callback: (payload) async {
+          final blocker = payload.oldRecord['blocker_id'] as String?;
+          if (blocker == null) return;
+          final cid = _findDmWith(blocker);
+          if (cid != null) {
+            _blockedMe[cid] = false;
+            if (mounted) setState(() {});
+          }
+        },
+      )
+      ..subscribe();
   }
 
   String? _findDmWith(String other) {
@@ -342,19 +508,23 @@ class _ChatListViewState extends State<ChatListView> {
         builder: (_) => ChatView(conversationId: id, title: title),
       ),
     );
-    await _loadUnread();
-    await _refreshBlockStatusFor(id);
-  }
 
-  Future<void> _refreshBlockStatusFor(String id) async {
-  try {
-    final st = await _svc.getBlockStatus(id);
-    _isDm[id] = st.isDm;
-    _iBlocked[id] = st.iBlocked;
-    _blockedMe[id] = st.blockedMe;
+    // DÖNÜNCE: unread sıfırla + snippet’ı tazele
+    try {
+      await _supa.rpc('mark_read', params: {'_conversation_id': id});
+    } catch (_) {}
+    _unread[id] = 0;
+
+    // son mesajı tekrar çek (okundu sonrası da aynı kalır ama emin olalım)
+    try {
+      final last = await _svc.fetchLastMessage(id);
+      if (last != null) {
+        _snippet[id] = await _safeDecryptSnippet(last);
+        _lastTime[id] = last.createdAt.toLocal();
+      }
+    } catch (_) {}
     if (mounted) setState(() {});
-  } catch (_) {}
-}
+  }
 
   Future<void> _deleteForMe(String id) async {
     try {
@@ -379,20 +549,26 @@ class _ChatListViewState extends State<ChatListView> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Delete conversation?'),
-        content: const Text('This will permanently delete all messages for this conversation.'),
+        content: const Text(
+            'This will permanently delete all messages for this conversation.'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Delete')),
         ],
       ),
     );
     if (ok != true) return;
 
     try {
-      await _supa.rpc('hard_delete_conversation', params: {'_conversation_id': id});
+      await _supa
+          .rpc('hard_delete_conversation', params: {'_conversation_id': id});
       _removeLocal(id);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Conversation deleted')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Conversation deleted')));
     } catch (e) {
       final fallback = await showDialog<bool>(
         context: context,
@@ -400,15 +576,20 @@ class _ChatListViewState extends State<ChatListView> {
           title: const Text('Not allowed to delete for everyone'),
           content: const Text('Remove it only for you?'),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-            TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete for me')),
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel')),
+            TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Delete for me')),
           ],
         ),
       );
       if (fallback == true) {
         await _deleteForMe(id);
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Delete failed: $e')));
       }
     }
   }
@@ -416,22 +597,27 @@ class _ChatListViewState extends State<ChatListView> {
   Future<void> _blockInDm(String id) async {
     try {
       await _supa.rpc('block_user_in_dm', params: {'_conversation_id': id});
-      _iBlocked[id] = true; // reflect immediately
+      _iBlocked[id] = true; // immediate reflect
       if (mounted) setState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User blocked')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('User blocked')));
+          await _reportAfterBlock(id);
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Block failed: $e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Block failed: $e')));
     }
   }
 
   Future<void> _unblockInDm(String id) async {
     try {
       await _supa.rpc('unblock_user_in_dm', params: {'_conversation_id': id});
-      _iBlocked[id] = false; // reflect immediately
+      _iBlocked[id] = false; // immediate reflect
       if (mounted) setState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User unblocked')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('User unblocked')));
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Unblock failed: $e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Unblock failed: $e')));
     }
   }
 
@@ -448,40 +634,29 @@ class _ChatListViewState extends State<ChatListView> {
     }).toList();
 
     return Scaffold(
-      appBar: AppBar(
+      appBar: HCAppBar(
         centerTitle: true,
-        title: const Text(
-          'Chats',
-          style: TextStyle(fontSize: 18),
-        ),
+        title: 'Chats',
+        titleStyle: TextStyle(fontSize: 18),
         actions: [
-          // ------------- FOR DEBUG -------------
-          // IconButton(
-          //   icon: const Icon(Icons.refresh),
-          //   onPressed: () async {
-          //     await _load();
-          //     await _loadUnread();
-          //   },
-          // ),
-          // ------------- FOR DEBUG -------------
-          IconButton(icon: const Icon(Icons.question_mark_outlined),
-          onPressed: () {
-            showDialog(
-              context: context,
-              builder: (context) {
-                return AlertDialog(
+          IconButton(
+            icon: const Icon(Icons.question_mark_outlined),
+            onPressed: () {
+              showDialog(
+                context: context,
+                builder: (context) => AlertDialog(
                   title: const Text('Information'),
-                  content: const Text('You can swipe a DM left to reveal more options.'),
+                  content: const Text(
+                      'You can swipe a DM left to reveal Block / Delete.'),
                   actions: [
                     TextButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      child: const Text('Close'),
-                    ),
+                        onPressed: () => Navigator.of(context).pop(),
+                        child: const Text('Close')),
                   ],
-                );
-              },
-            );
-          })
+                ),
+              );
+            },
+          )
         ],
       ),
       body: _loading
@@ -534,18 +709,21 @@ class _ChatListViewState extends State<ChatListView> {
 
           final isDm = _isDm[id] ?? false;
           final iBlocked = _iBlocked[id] ?? false;
+          final blockedMe = _blockedMe[id] ?? false;
 
           return Slidable(
             key: ValueKey('conv-$id'),
             endActionPane: ActionPane(
               motion: const DrawerMotion(),
-              extentRatio: isDm ? 0.45 : 0.25,
+              extentRatio: isDm ? 0.45 : 0.25, // DM ise daha geniş alan
               children: [
                 if (isDm)
                   SlidableAction(
-                    onPressed: (_) => iBlocked ? _unblockInDm(id) : _blockInDm(id),
-                    backgroundColor:
-                        iBlocked ? const Color(0xFFE8F5E9) : const Color(0xFFFFEEF0),
+                    onPressed: (_) =>
+                        iBlocked ? _unblockInDm(id) : _blockInDm(id),
+                    backgroundColor: iBlocked
+                        ? const Color(0xFFE8F5E9) // unblock rengi
+                        : const Color(0xFFFFEEF0), // block rengi
                     foregroundColor:
                         iBlocked ? const Color(0xFF2E7D32) : Colors.red,
                     icon: iBlocked ? Icons.lock_open : Icons.block,
@@ -563,22 +741,39 @@ class _ChatListViewState extends State<ChatListView> {
               ],
             ),
             child: ListTile(
-              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               leading: avatar != null && avatar.isNotEmpty
                   ? CircleAvatar(backgroundImage: NetworkImage(avatar))
-                  : CircleAvatar(child: Text(title.isNotEmpty ? title[0].toUpperCase() : '?')),
-              title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  : CircleAvatar(
+                      child: Text(
+                          title.isNotEmpty ? title[0].toUpperCase() : '?')),
+              title: Row(
+                children: [
+                  Expanded(
+                      child: Text(title,
+                          maxLines: 1, overflow: TextOverflow.ellipsis)),
+                  if (isDm && (iBlocked || blockedMe))
+                    Padding(
+                      padding: const EdgeInsets.only(left: 6),
+                      child: Icon(Icons.block,
+                          size: 16, color: Colors.red.withOpacity(0.8)),
+                    ),
+                ],
+              ),
               subtitle: Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis),
               trailing: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   if (t != null)
                     Text(_fmtTime(t),
-                        style: const TextStyle(color: Colors.black54, fontSize: 12)),
+                        style: const TextStyle(
+                            color: Colors.black54, fontSize: 12)),
                   const SizedBox(height: 6),
                   if (unread > 0)
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
                       decoration: BoxDecoration(
                         color: const Color(0xFF007AFF),
                         borderRadius: BorderRadius.circular(12),
@@ -586,7 +781,9 @@ class _ChatListViewState extends State<ChatListView> {
                       child: Text(
                         unread > 99 ? '99+' : '$unread',
                         style: const TextStyle(
-                            color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600),
                       ),
                     ),
                 ],
@@ -622,12 +819,12 @@ class _ChatListViewState extends State<ChatListView> {
     final d = t.isUtc ? t.toLocal() : t;
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    final that  = DateTime(d.year, d.month, d.day);
+    final that = DateTime(d.year, d.month, d.day);
 
     if (that == today) {
       final hh = d.hour.toString().padLeft(2, '0');
       final mm = d.minute.toString().padLeft(2, '0');
-      return '$hh:$mm'; // bugünse SAAT
+      return '$hh:$mm';
     }
     return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
   }

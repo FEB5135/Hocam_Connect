@@ -1,17 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:project/view/chat_list_view.dart';
+import 'package:project/view/gpa_calculator_view.dart';
 
 import 'package:project/view/home_view.dart';
 import 'package:project/view/marketplace_view.dart';
 import 'package:project/view/profile_view.dart';
+import 'package:project/view/settings_view.dart';
 import 'package:project/view/this_week_view.dart';
+import 'package:project/view/hitchike_view.dart';
 
 import 'dart:math' as math;
-
-
-
-
-
 
 class MainTabView extends StatefulWidget {
   const MainTabView({super.key});
@@ -42,9 +40,9 @@ class _MainTabViewState extends State<MainTabView>
 
   static const List<Widget> _pages = <Widget>[
     HomeView(),
-    ThisWeekView(),
+    MarketplaceView(),
     ChatListView(),
-    ProfileView(),
+    ThisWeekView(),
   ];
 
   void _onItemTapped(int index) {
@@ -59,8 +57,7 @@ class _MainTabViewState extends State<MainTabView>
   void _toggleMenu() {
     if (_animationController.isCompleted) {
       _animationController.reverse();
-    }
-    else {
+    } else {
       _animationController.forward();
     }
   }
@@ -68,38 +65,35 @@ class _MainTabViewState extends State<MainTabView>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: IndexedStack(
-        index: _selectedIndex,
-        children: _pages,
-      ),
-        floatingActionButton: Stack(
-        alignment: Alignment.center,
-        clipBehavior: Clip.none,
+      body: Stack(
         children: [
-          // The main central button
-          FloatingActionButton(
-            shape: const CircleBorder(),
-            backgroundColor: Colors.white,
-            elevation: 4.0,
-            onPressed: _toggleMenu,
-            child: AnimatedBuilder(
-              animation: _animationController,
-              builder: (context, child) {
-                // When menu is open, show a close icon
-                if (_animationController.isCompleted) {
-                  return const Icon(Icons.close, color: Colors.black);
-                }
-                // Otherwise, show the logo
-                return Padding(
-                  padding: const EdgeInsets.all(10.0),
-                  child: Image.asset('assets/logo/acm_logo.png'),
-                );
-              },
-            ),
+          IndexedStack(
+            index: _selectedIndex,
+            children: _pages,
           ),
-          // The circular menu items
           _buildMenuOverlay(),
         ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        heroTag: 'main_menu_fab',
+        shape: const CircleBorder(),
+        backgroundColor: Colors.white,
+        elevation: 4.0,
+        onPressed: _toggleMenu,
+        child: AnimatedBuilder(
+          animation: _animationController,
+          builder: (context, child) {
+            // When menu is open, show a close icon
+            if (_animationController.isCompleted) {
+              return const Icon(Icons.close, color: Colors.black);
+            }
+            // Otherwise, show the logo
+            return Padding(
+              padding: const EdgeInsets.all(10.0),
+              child: Image.asset('assets/logo/hc_logo.png'),
+            );
+          },
+        ),
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
       bottomNavigationBar: BottomAppBar(
@@ -115,7 +109,7 @@ class _MainTabViewState extends State<MainTabView>
                 children: <Widget>[
                   _buildTabItem(icon: Icons.home, label: 'Home', index: 0),
                   _buildTabItem(
-                      icon: Icons.star_border, label: 'TWOC', index: 1),
+                      icon: Icons.storefront, label: 'Marketplace', index: 1),
                 ],
               ),
               Row(
@@ -124,7 +118,7 @@ class _MainTabViewState extends State<MainTabView>
                   _buildTabItem(
                       icon: Icons.chat_bubble_outline, label: 'Chats', index: 2),
                   _buildTabItem(
-                      icon: Icons.person_outline, label: 'Profile', index: 3),
+                      icon: Icons.star_border, label: 'TWOC', index: 3),
                 ],
               )
             ],
@@ -134,7 +128,7 @@ class _MainTabViewState extends State<MainTabView>
     );
   }
 
-  // This widget builds the arc menu. It no longer needs Align.
+  // This widget builds the arc menu.
   Widget _buildMenuOverlay() {
     return AnimatedBuilder(
       animation: _animationController,
@@ -145,40 +139,65 @@ class _MainTabViewState extends State<MainTabView>
         // The menu is only visible when the animation is running or completed
         if (animationValue == 0) return const SizedBox.shrink();
 
-        return Stack(
-          alignment: Alignment.center,
-          children: [
-            // GPA Calculator
-            _buildMenuItem(
-              icon: Icons.calculate_outlined,
-              angle: -135, // Top-left
-              animationValue: animationValue,
-              onPressed: () {
-                _toggleMenu();
-              },
-            ),
-            // Marketplace
-            _buildMenuItem(
-              icon: Icons.storefront,
-              angle: -90, // Top-center
-              animationValue: animationValue,
-              onPressed: () {
-                _toggleMenu();
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (context) => const MarketplaceView()),
-                );
-              },
-            ),
-            // Hitchhike
-            _buildMenuItem(
-              icon: Icons.directions_car_outlined,
-              angle: -45, // Top-right
-              animationValue: animationValue,
-              onPressed: () => _toggleMenu(),
-            ),
-          ],
+        return Positioned.fill(
+          child: Stack(
+            alignment: Alignment.bottomCenter,
+            clipBehavior: Clip.none,
+            children: [
+              // Full-screen GestureDetector to close the menu
+              GestureDetector(
+                onTap: _toggleMenu,
+                child: Container(
+                  color: Colors.black.withOpacity(0.3 * animationValue),
+                ),
+              ),
+              // GPA Calculator
+              _buildMenuItem(
+                icon: Icons.calculate_outlined,
+                heroTag: 'menu_calc',
+                angle: -135, // Top-left
+                animationValue: animationValue,
+                onPressed: () {
+                  _toggleMenu();
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => const GpaCalculatorView()),
+                  );
+                },
+              ),
+              // Marketplace
+              _buildMenuItem(
+                icon: Icons.settings,
+                heroTag: 'menu_settings',
+                angle: -90, // Top-center
+                animationValue: animationValue,
+                onPressed: () {
+                  _toggleMenu();
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => const SettingsView()),
+                  );
+                },
+              ),
+              // Hitchhike
+              _buildMenuItem(
+                icon: Icons.directions_car_outlined,
+                heroTag: 'menu_hitch',
+                angle: -45, // Top-right
+                animationValue: animationValue,
+                onPressed: () {
+                  _toggleMenu();
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => const HitchikeView()),
+                  );
+                },
+              ),
+            ],
+          ),
         );
       },
     );
@@ -187,21 +206,22 @@ class _MainTabViewState extends State<MainTabView>
   // Helper to build and position each individual menu button
   Widget _buildMenuItem({
     required IconData icon,
+    required String heroTag,
     required double angle,
     required double animationValue,
     required VoidCallback onPressed,
   }) {
-    final radius = 70.0 * animationValue;
+    final radius = 80.0;
     final x = radius * math.cos(angle * math.pi / 180);
-    // It adjusts 'y' to position it correctly relative to the FAB's center
-    final y = radius * math.sin(angle * math.pi / 180) - 40;
+    final y = radius * math.sin(angle * math.pi / 180);
 
-    return Transform.translate(
-      offset: Offset(x, y),
-      child: Opacity(
-        opacity: animationValue,
+    return Positioned(
+      bottom: - y, // Position above the FAB
+      left: MediaQuery.of(context).size.width / 2 - 20 + x, // Center horizontally
+      child: Transform.scale(
+        scale: animationValue,
         child: FloatingActionButton(
-          heroTag: null,
+          heroTag: heroTag,
           mini: true,
           onPressed: onPressed,
           backgroundColor: Colors.white,
