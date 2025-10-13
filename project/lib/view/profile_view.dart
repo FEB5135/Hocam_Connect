@@ -1,8 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:image_picker/image_picker.dart';
-
+import 'package:path/path.dart' as p;
+import 'dart:io' show Platform;
+import 'package:device_info_plus/device_info_plus.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'settings_view.dart';
+import 'package:project/widgets/custom_appbar.dart';
 
 class ProfileView extends StatefulWidget {
   const ProfileView({super.key});
@@ -18,10 +23,40 @@ class _ProfileViewState extends State<ProfileView> {
   late TextEditingController nameController;
   late TextEditingController emailController;
   late TextEditingController dobController; // UI (DD/MM/YYYY)
-  late TextEditingController departmentController;
 
   DateTime? _dob; // DB için gerçek tarih
   String? profileImageUrl; // public/signed url
+
+  final TextEditingController _bugDetailsCtrl = TextEditingController();
+  static const List<String> _bugReasons = [
+    'Crash',
+    'UI issue',
+    'Performance',
+    'Wrong data',
+    'Other',
+  ];
+
+  // Department dropdown için:
+  static const List<String> _departments = <String>[
+    // Burayı kendi bölümlerinizle doldurun
+    'ASE',
+    'BUS',
+    'EEE',
+    'ECO',
+    'CNG',
+    'CVE',
+    'CYG',
+    'CHME',
+    'MECH',
+    'PSIR',
+    'PSY',
+    'INE',
+    'PGE',
+    'SNG',
+    'GPC',
+    'TEFL'
+  ];
+  String? _selectedDepartment; // null ise hiç seçilmemiş demektir (hint görünsün)
 
   static const _bucket = 'profile'; // Supabase bucket to store avatars
 
@@ -31,7 +66,6 @@ class _ProfileViewState extends State<ProfileView> {
     nameController = TextEditingController();
     emailController = TextEditingController();
     dobController = TextEditingController();
-    departmentController = TextEditingController();
     fetchProfile();
   }
 
@@ -40,7 +74,7 @@ class _ProfileViewState extends State<ProfileView> {
     nameController.dispose();
     emailController.dispose();
     dobController.dispose();
-    departmentController.dispose();
+    _bugDetailsCtrl.dispose();
     super.dispose();
   }
 
@@ -80,6 +114,68 @@ class _ProfileViewState extends State<ProfileView> {
     return null;
   }
 
+// For bug metadata
+Future<Map<String, dynamic>> _collectBugMeta() async {
+  final meta = <String, dynamic>{};
+
+  // app info
+  Map<String, dynamic> app = {
+    'name': 'Hocam Connect',
+    'version': 'unknown',
+    'build': 'unknown',
+  };
+  try {
+    final p = await PackageInfo.fromPlatform();
+    app = {'name': p.appName, 'version': p.version, 'build': p.buildNumber};
+  } catch (_) {
+    // keep defaults
+  }
+  meta['app'] = app;
+
+  // platform/device
+  final deviceInfo = DeviceInfoPlugin();
+  String platform = kIsWeb ? 'Web' : Platform.operatingSystem;
+  Map<String, dynamic> device = {'info': 'generic'};
+
+  try {
+    if (!kIsWeb && Platform.isIOS) {
+      final ios = await deviceInfo.iosInfo;
+      platform = 'iOS';
+      device = {
+        'name': ios.name,
+        'model': ios.model,
+        'machine': ios.utsname.machine,      // x86_64/arm64 on simulator
+        'systemName': ios.systemName,
+        'systemVersion': ios.systemVersion,
+        'isPhysicalDevice': ios.isPhysicalDevice,
+      };
+    } else if (!kIsWeb && Platform.isAndroid) {
+      final and = await deviceInfo.androidInfo;
+      platform = 'Android';
+      device = {
+        'brand': and.brand,
+        'model': and.model,
+        'device': and.device,
+        'version': and.version.release,
+        'sdkInt': and.version.sdkInt,
+        'isPhysicalDevice': and.isPhysicalDevice,
+      };
+    }
+  } catch (_) {/* keep generic */}
+
+  meta['platform'] = platform;
+  meta['device'] = device;
+
+  // locale + timestamp
+  try {
+    meta['locale'] = WidgetsBinding.instance.platformDispatcher.locale.toString();
+  } catch (_) {}
+  meta['ts'] = DateTime.now().toIso8601String();
+
+  return meta;
+}
+
+
   Future<void> fetchProfile() async {
     final user = supa.auth.currentUser;
     if (user == null) return;
@@ -91,7 +187,7 @@ class _ProfileViewState extends State<ProfileView> {
         .eq('id', user.id)
         .maybeSingle();
 
-    if (data == null || data is! Map<String, dynamic>) {
+    if (data == null) {
       return;
     }
 
@@ -102,6 +198,10 @@ class _ProfileViewState extends State<ProfileView> {
 
     final parsedDob = _parseDob(data['dob']);
 
+    final dep = (data['department'] ?? '').toString().trim();
+    // Veritabanından gelen değer listedeyse onu seç, değilse null bırak (hint gözüksün)
+    final normalized = dep.isEmpty ? null : dep;
+    final inList = _departments.contains(normalized);
     setState(() {
       nameController.text = fullName;
       emailController.text = user.email ?? '';
@@ -117,11 +217,85 @@ class _ProfileViewState extends State<ProfileView> {
         dobController.text = '';
       }
 
-      final dep = (data['department'] ?? '').toString().trim();
-      departmentController.text = dep.isEmpty ? 'Please add department' : dep;
-
+      _selectedDepartment = inList ? normalized : normalized; // listedeyse de değilse de gösterelim; dropdown'da yoksa "Other" seçebilirsin
       profileImageUrl = (data['avatar_url'] ?? '').toString();
     });
+  }
+
+// Report a bug
+Future<void> _reportBug() async {
+  final me = supa.auth.currentUser?.id;
+  final meta = await _collectBugMeta();
+  if (me == null) return;
+
+  String selected = _bugReasons.first;
+  _bugDetailsCtrl.clear();
+
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: const Text('Report a bug'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          DropdownButtonFormField<String>(
+            value: selected,
+            items: _bugReasons.map((r) => DropdownMenuItem(value: r, child: Text(r))).toList(),
+            onChanged: (v) => selected = v ?? selected,
+            decoration: const InputDecoration(labelText: 'Reason'),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _bugDetailsCtrl,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: 'Details (optional)',
+              hintText: 'What happened? Steps to reproduce?',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Submit')),
+      ],
+    ),
+  );
+
+  if (ok != true) return;
+
+  try {
+    await supa.from('bug_reports').insert({
+      'reporter_id': me,
+      'screen': 'profile',
+      'reason': selected,
+      'details': _bugDetailsCtrl.text.trim().isEmpty ? null : _bugDetailsCtrl.text.trim(),
+       'meta': meta, 
+    });
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Thanks! Bug reported.')));
+  } on PostgrestException catch (e) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Submit failed: ${e.message}')));
+  } catch (e) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Submit failed: $e')));
+  }
+}
+
+
+  Future<void> _logout() async {
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+
+    await Supabase.instance.client.auth.signOut();
+
+    // Navigate to login and remove all previous routes
+    navigator.pushNamedAndRemoveUntil('/login', (route) => false);
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Logged out')),
+    );
   }
 
   Future<void> updateProfile() async {
@@ -139,7 +313,7 @@ class _ProfileViewState extends State<ProfileView> {
 
     final payload = <String, dynamic>{
       'avatar_url': profileImageUrl,
-      'department': departmentController.text.trim(),
+      'department': (_selectedDepartment ?? '').trim(),
     };
 
     // _dob yoksa DB’deki dob’u ezme
@@ -183,28 +357,40 @@ class _ProfileViewState extends State<ProfileView> {
       if (user == null) return;
 
       final bytes = await picked.readAsBytes();
-      final contentType = _mimeFromPath(picked.path);
 
-      final objectPath = 'avatars/${user.id}';
+      // Derive extension + content type
+      final ext = p.extension(picked.path).toLowerCase().replaceFirst('.', '');
+
+      // Always include a filename
+      final fileName = 'avatar_${DateTime.now().millisecondsSinceEpoch}.$ext';
+      final objectPath = 'avatars/${user.id}/$fileName';
+
       await supa.storage
-          .from(_bucket)
-          .uploadBinary(objectPath, bytes,
-              fileOptions: FileOptions(
-                upsert: true,
-                contentType: contentType,
-              ));
+          .from(_bucket) // 'profile'
+          .uploadBinary(
+            objectPath,
+            bytes,
+            fileOptions: const FileOptions(
+              upsert: true, // requires UPDATE policy if key already exists
+              contentType: 'image/jpeg', // isterseniz contentType değişkenini kullanın
+            ),
+          );
 
-      final publicUrl =
-          supa.storage.from(_bucket).getPublicUrl(objectPath);
+      // If bucket is PUBLIC:
+      final publicUrl = supa.storage.from(_bucket).getPublicUrl(objectPath);
       final urlWithTs =
           '$publicUrl?ts=${DateTime.now().millisecondsSinceEpoch}';
+
+      // If bucket is PRIVATE, use signed URL instead:
+      // final signed = await supa.storage.from(_bucket).createSignedUrl(objectPath, 60 * 60 * 24 * 7); // 7 days
+      // final urlWithTs = '${signed}?ts=${DateTime.now().millisecondsSinceEpoch}';
 
       setState(() {
         profileImageUrl = urlWithTs;
       });
 
       await supa.from('profiles').update({
-        'avatar_url': urlWithTs,
+        'avatar_url': urlWithTs, // (Tercihen DB'ye sadece objectPath yaz, okurken URL üret)
       }).eq('id', user.id);
     } catch (e) {
       if (!mounted) return;
@@ -234,39 +420,12 @@ class _ProfileViewState extends State<ProfileView> {
     }
   }
 
-  void _showMenu(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.edit),
-              title: const Text('Edit Profile'),
-              onTap: () {
-                Navigator.pop(ctx);
-                setState(() => isEditing = true);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.settings),
-              title: const Text('Settings'),
-              onTap: () {
-                Navigator.pop(ctx);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (context) => const SettingsView()),
-                );
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
- //Builder
+  String get _departmentDisplay =>
+      (_selectedDepartment == null || _selectedDepartment!.trim().isEmpty)
+          ? 'Please add department'
+          : _selectedDepartment!;
+
+  //Builder
   @override
   Widget build(BuildContext context) {
     final avatar = CircleAvatar(
@@ -287,23 +446,27 @@ class _ProfileViewState extends State<ProfileView> {
     );
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Profile', style: TextStyle(fontSize: 17)),
-        centerTitle: true,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.menu),
-          onPressed: () => _showMenu(context),
-        ),
-        actions: [
-          if (isEditing)
-            IconButton(
-              icon: const Icon(Icons.save),
-              tooltip: 'Save Profile',
-              onPressed: updateProfile,
-            ),
-        ],
+     appBar: HCAppBar(
+      title: 'Profile',
+      leading: IconButton(
+        icon: const Icon(Icons.arrow_back),
+        onPressed: () => Navigator.pop(context),
       ),
+      actions: [
+        if (isEditing)
+          IconButton(
+            icon: const Icon(Icons.save),
+            tooltip: 'Save Profile',
+            onPressed: updateProfile,
+          ),
+        IconButton(
+          icon: const Icon(Icons.logout),
+          tooltip: 'Logout',
+          onPressed: _logout,
+        ),
+      ],
+    ),
+
       body: SingleChildScrollView(
         child: Column(
           children: [
@@ -365,16 +528,37 @@ class _ProfileViewState extends State<ProfileView> {
                             value: dobController.text,
                           ),
                     const Divider(),
+                    // Department: Edit modunda dropdown, görüntü modunda satır
                     isEditing
-                        ? TextField(
-                            controller: departmentController,
+                        ? DropdownButtonFormField<String>(
+                            value: _departments.contains(_selectedDepartment)
+                                ? _selectedDepartment
+                                : (_selectedDepartment == null ||
+                                        _selectedDepartment!.isEmpty)
+                                    ? null
+                                    : _selectedDepartment, // listedeyse value, değilse serbest göster; yoksa null
+                            items: _departments
+                                .map((d) => DropdownMenuItem<String>(
+                                      value: d,
+                                      child: Text(d),
+                                    ))
+                                .toList(),
+                            onChanged: (val) {
+                              setState(() {
+                                _selectedDepartment = val;
+                              });
+                            },
                             decoration: const InputDecoration(
-                                labelText: 'Department'),
+                              labelText: 'Department',
+                              hintText:
+                                  'Please add department', // kullanıcıya hint, silmesi gerekmiyor
+                            ),
+                            isExpanded: true,
                           )
                         : ProfileInfoRow(
                             icon: Icons.school,
                             label: 'Department',
-                            value: departmentController.text,
+                            value: _departmentDisplay,
                           ),
                   ],
                 ),
@@ -382,16 +566,65 @@ class _ProfileViewState extends State<ProfileView> {
             ),
             const SizedBox(height: 32),
             Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: const [
-                Icon(Icons.lock, size: 16, color: Colors.grey),
-                SizedBox(width: 6),
-                Text(
-                  'All sensitive data is stored securely.',
-                  style: TextStyle(fontSize: 12, color: Colors.grey),
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: const [
+              Icon(Icons.lock, size: 16, color: Colors.grey),
+              SizedBox(width: 6),
+              Text(
+                'All sensitive data is stored securely.',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          // Çiplerin "onPressed"lerini state'e bağlayabilmek için Builder kullan:
+          Builder(
+            builder: (ctx) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    ActionChip(
+                      avatar: const Icon(Icons.edit, size: 18),
+                      label: const Text('Edit Profile'),
+                      onPressed: () => setState(() => isEditing = true),
+                    ),
+                    ActionChip(
+                      avatar: const Icon(Icons.settings, size: 18),
+                      label: const Text('Settings'),
+                      onPressed: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const SettingsView()),
+                        );
+                      },
+                    ),
+                  ],
                 ),
-              ],
+              );
+            },
+          ),
+
+          // ⬇️ EKLE: Report a bug (tam genişlik, unobtrusive)
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+            child: SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.bug_report_outlined),
+                label: const Text('Report a bug'),
+                onPressed: _reportBug, // <-- yeni fonksiyon
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
             ),
+          ),
           ],
         ),
       ),

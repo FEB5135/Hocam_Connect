@@ -1,0 +1,47 @@
+name: Build iOS IPA (Flutter)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+
+    steps:
+      # 1️⃣ Checkout your project
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # 2️⃣ Set up Flutter environment
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      # 3️⃣ Get Flutter dependencies
+      - name: Install dependencies
+        run: flutter pub get
+
+      # 4️⃣ Precache iOS components
+      - name: Precache iOS artifacts
+        run: flutter precache --ios
+
+      # 5️⃣ Ensure CocoaPods are installed (for iOS frameworks)
+      - name: Install CocoaPods
+        run: |
+          cd ios
+          pod repo update
+          pod install
+
+      # 6️⃣ Build unsigned .ipa (no Apple account required)
+      - name: Build iOS IPA (unsigned)
+        run: flutter build ipa --release --no-codesign
+
+      # 7️⃣ Upload .ipa artifact to GitHub for download
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-ipa
+          path: build/ios/ipa/*.ipa
