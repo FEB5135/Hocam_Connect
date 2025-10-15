@@ -39,7 +39,7 @@ class _HomeViewState extends State<HomeView> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: HCAppBar(
-        title: 'Home Screen',
+        title: 'Home Screen',//....
         actions: [
           IconButton(
             icon: const Icon(Icons.account_box),
